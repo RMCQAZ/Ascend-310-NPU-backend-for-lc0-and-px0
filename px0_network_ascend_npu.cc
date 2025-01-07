@@ -89,7 +89,7 @@ class AscendNPUNetwork : public Network {
   }
 
   int GetMiniBatchSize() const override {
-    return ASCEND_NPU_BATCH_SIZE;
+    return ASCEND_NPU_BATCH_SIZE * ASCEND_NPU_CORE_NUM;
   }
 
   static uint networkCount;
