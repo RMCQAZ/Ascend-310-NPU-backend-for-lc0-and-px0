@@ -16,6 +16,7 @@
 #include "neural/onnx/converter.h"
 
 #define ASCEND_NPU_CACHE_DIR std::string("/dev/shm/.ascend-npu-cache-lc")
+#define ASCEND_NPU_CORE_ID { 0, 1, 2, 3 }
 #define ASCEND_NPU_CORE_NUM 4
 #define ASCEND_NPU_BATCH_SIZE 16
 
@@ -89,7 +90,7 @@ class AscendNPUNetwork : public Network {
   }
 
   int GetMiniBatchSize() const override {
-    return ASCEND_NPU_BATCH_SIZE * ASCEND_NPU_CORE_NUM;
+    return ASCEND_NPU_BATCH_SIZE * ASCEND_NPU_CORE_NUM * 2;
   }
 
   static uint networkCount;
@@ -112,10 +113,11 @@ class AscendNPU {
     if (ret != ACL_SUCCESS) throw Exception("[Ascend NPU] Ascend cl init failed!");
     AscendNPU::Log("[Ascend NPU] Ascend cl init OK.");
     BlockingQueue<int> threadStatus(ASCEND_NPU_CORE_NUM);
-    for (size_t deviceId = 0; deviceId < ASCEND_NPU_CORE_NUM; deviceId++) {
-      modelSync_[deviceId] = new BlockingQueue<bool>(1);
+    auto index = 0;
+    for (auto &deviceId : ASCEND_NPU_CORE_ID) {
+      modelSync_[index] = new BlockingQueue<bool>(1);
       std::thread worker(
-        [&, deviceId] {
+        [&, deviceId, index] {
           auto ret = aclrtSetDevice(deviceId);
           if (ret != ACL_SUCCESS) {
             AscendNPU::Log("[Ascend NPU] Thread " + std::to_string(deviceId) + " init device failed!");
@@ -220,7 +222,7 @@ class AscendNPU {
                 for (size_t i = 0; i < ASCEND_NPU_CORE_NUM; i++) AscendNPU::modelSync_[i]->push(true);
               }
               AscendNPU::modelGotMutex_->unlock();
-              AscendNPU::modelSync_[deviceId]->pop();
+              AscendNPU::modelSync_[index]->pop();
               if (computeTask.type == AscendNPUTaskType::LOAD_MODEL) { // Load
                 uint32_t modelId;
                 ret = aclmdlLoadFromFile(computeTask.modelPath.c_str(), &modelId);
@@ -391,6 +393,7 @@ class AscendNPU {
         }
       );
       worker.detach();
+      index++;
     }
     for (size_t i = 0; i < ASCEND_NPU_CORE_NUM; i++) {
       if (threadStatus.pop() != 0) {
@@ -537,7 +540,7 @@ void AscendNPUComputation::ComputeBlocking() {
   while (batchOffset != totalBatchSize) {
     batchBatchSize = std::min(totalBatchSize - batchOffset, static_cast<size_t>(ASCEND_NPU_BATCH_SIZE));
     // Prepare input data
-    auto ret = aclrtSetDevice(0);
+    auto ret = aclrtSetDevice(std::vector<int>(ASCEND_NPU_CORE_ID)[0]);
     if (ret != ACL_SUCCESS) {
       AscendNPU::Stop();
       throw Exception("[Ascend NPU] Computation set device failed!");
@@ -545,7 +548,7 @@ void AscendNPUComputation::ComputeBlocking() {
     void* inputData;
     ret = aclrtMallocHost(&inputData, 2 * ASCEND_NPU_BATCH_SIZE * kInputPlanes * 8 * 8);
     if (ret != ACL_SUCCESS) {
-      aclrtResetDevice(0);
+      aclrtResetDevice(std::vector<int>(ASCEND_NPU_CORE_ID)[0]);
       AscendNPU::Stop();
       throw Exception("[Ascend NPU] Computation malloc input host failed!");
     }
@@ -553,11 +556,11 @@ void AscendNPUComputation::ComputeBlocking() {
     ret = aclrtMemset(inputData, 2 * ASCEND_NPU_BATCH_SIZE * kInputPlanes * 8 * 8, 0, 2 * ASCEND_NPU_BATCH_SIZE * kInputPlanes * 8 * 8);
     if (ret != ACL_SUCCESS) {
       aclrtFreeHost(inputData);
-      aclrtResetDevice(0);
+      aclrtResetDevice(std::vector<int>(ASCEND_NPU_CORE_ID)[0]);
       AscendNPU::Stop();
       throw Exception("[Ascend NPU] Computation memset input host failed!");
     }
-    ret = aclrtResetDevice(0);
+    ret = aclrtResetDevice(std::vector<int>(ASCEND_NPU_CORE_ID)[0]);
     if (ret != ACL_SUCCESS) {
       aclrtFreeHost(inputData);
       AscendNPU::Stop();
